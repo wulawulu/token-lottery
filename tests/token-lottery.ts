@@ -1,6 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { TokenLottery } from "../target/types/token_lottery";
+import { TOKEN_PROGRAM_ID } from "@coral-xyz/anchor/dist/cjs/utils/token";
 
 describe("token-lottery", () => {
   // Configure the client to use the local cluster.
@@ -25,9 +26,20 @@ describe("token-lottery", () => {
       lastValidBlockHeight: blockhashWithContext.lastValidBlockHeight,
     })
     .add(initConfigIx);
-    console.log("Your transaction signature", tx);
 
-    const signature = await anchor.web3.sendAndConfirmTransaction(provider.connection, tx, [wallet.payer]);
+    const signature = await anchor.web3.sendAndConfirmTransaction(provider.connection, tx, [wallet.payer],{skipPreflight: true});
     console.log("Your transaction signature", signature);
+    
+    const initLotteryIx = await program.methods.initializeLottery().accounts(
+      { tokenProgram: TOKEN_PROGRAM_ID }
+    ).instruction();
+     const initLotteryTx = new anchor.web3.Transaction({
+      feePayer: wallet.publicKey,
+      blockhash: blockhashWithContext.blockhash,
+      lastValidBlockHeight: blockhashWithContext.lastValidBlockHeight,
+    })
+    .add(initLotteryIx);
+    const lotterySignature = await anchor.web3.sendAndConfirmTransaction(provider.connection, initLotteryTx, [wallet.payer],{skipPreflight: true});
+    console.log("Your lotterySignature signature", lotterySignature);
   });
 });
