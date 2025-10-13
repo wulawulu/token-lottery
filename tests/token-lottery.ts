@@ -11,6 +11,35 @@ describe("token-lottery", () => {
 
   const program = anchor.workspace.tokenLottery as Program<TokenLottery>;
 
+  async function buyTicket(){
+    const buyTicketIx = await program.methods.buyTicket()
+        .accounts({
+          tokenProgram: TOKEN_PROGRAM_ID,
+        }).instruction();
+
+    const blockhashWithContext = await provider.connection.getLatestBlockhash();
+    
+    const computeIx = anchor.web3.ComputeBudgetProgram.setComputeUnitLimit({
+      units: 300000,
+    });
+
+    const priorityIx = anchor.web3.ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 1,
+    });
+    
+    const tx = new anchor.web3.Transaction({
+      feePayer: wallet.publicKey,
+      blockhash: blockhashWithContext.blockhash,
+      lastValidBlockHeight: blockhashWithContext.lastValidBlockHeight,
+    })
+    .add(computeIx)
+    .add(priorityIx)
+    .add(buyTicketIx);
+
+    const signature = await anchor.web3.sendAndConfirmTransaction(provider.connection, tx, [wallet.payer],{skipPreflight: true});
+    console.log("Your transaction signature", signature);
+  }
+
   it("should init config", async () => {
     // Add your test here.
     const initConfigIx = await program.methods.initializeConfig(
@@ -33,7 +62,7 @@ describe("token-lottery", () => {
     const initLotteryIx = await program.methods.initializeLottery().accounts(
       { tokenProgram: TOKEN_PROGRAM_ID }
     ).instruction();
-     const initLotteryTx = new anchor.web3.Transaction({
+    const initLotteryTx = new anchor.web3.Transaction({
       feePayer: wallet.publicKey,
       blockhash: blockhashWithContext.blockhash,
       lastValidBlockHeight: blockhashWithContext.lastValidBlockHeight,
@@ -41,5 +70,7 @@ describe("token-lottery", () => {
     .add(initLotteryIx);
     const lotterySignature = await anchor.web3.sendAndConfirmTransaction(provider.connection, initLotteryTx, [wallet.payer],{skipPreflight: true});
     console.log("Your lotterySignature signature", lotterySignature);
+
+    await buyTicket();
   });
 });
