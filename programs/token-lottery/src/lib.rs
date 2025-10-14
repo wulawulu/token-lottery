@@ -6,7 +6,7 @@ use anchor_spl::{
     token_interface::{Mint, TokenAccount, TokenInterface},
 };
 
-declare_id!("33GifPu8vYu2ZKKgXoicN9FteTVWxUaosCMG4NaBPte5");
+declare_id!("HAsY3haak8k3TnvXhE2pZgVigvc1QBx4JF2Eixm2yJYV");
 
 #[constant]
 pub const NAME: &str = "Token Lottery Ticket #";
@@ -26,6 +26,7 @@ pub mod token_lottery {
         },
         token_interface::{mint_to, MintTo},
     };
+    use switchboard_on_demand::RandomnessAccountData;
 
     use super::*;
 
@@ -242,6 +243,23 @@ pub mod token_lottery {
         ctx.accounts.token_lottery.ticket_num += 1;
         Ok(())
     }
+
+    pub fn commit_a_winner(ctx: Context<CommitWinner>) -> Result<()> {
+        let clock = Clock::get()?;
+        let token_lottery = &mut ctx.accounts.token_lottery;
+        if ctx.accounts.payer.key() != token_lottery.authority {
+            return Err(ErrorCode::NotAuthorized.into());
+        }
+        let randomness_data =
+            RandomnessAccountData::parse(ctx.accounts.randomness_account_data.data.borrow())
+                .unwrap();
+        if randomness_data.seed_slot!=clock.slot-1{
+            return Err(ErrorCode::RandomnessAlreadyRevealed.into());
+        }
+        token_lottery.randomness_account = ctx.accounts.randomness_account_data.key();
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -415,6 +433,24 @@ pub struct BuyTicket<'info> {
     pub rent: Sysvar<'info, Rent>,
 }
 
+#[derive(Accounts)]
+pub struct CommitWinner<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"token_lottery".as_ref()],
+        bump = token_lottery.bump,
+    )]
+    pub token_lottery: Account<'info, TokenLottery>,
+
+    /// CHECK: The account's data is validated manually within the handler
+    pub randomness_account_data: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct TokenLottery {
@@ -434,4 +470,14 @@ pub struct TokenLottery {
 pub enum ErrorCode {
     #[msg("Lottery is not open")]
     LotteryNotOpen,
+    #[msg("Incorrect randomness account")]
+    IncorrectRandomnessAccount,
+    #[msg("Lottery not completed")]
+    LotteryNotCompleted,
+    #[msg("Not authorized")]
+    NotAuthorized,
+    #[msg("Winner has already been chosen")]
+    WinnerChosen,
+    #[msg("Randomness already revealed for this slot")]
+    RandomnessAlreadyRevealed,
 }
