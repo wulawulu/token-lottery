@@ -161,7 +161,35 @@ describe("token-lottery", () => {
       createRandomnessSignature
     );
 
-    const sbCommitIx = await randomness.commitIx(queue);
+    const oracleKeys = await queueAccount.fetchOracleKeys();
+    const oracleAccounts =
+      oracleKeys.length > 0
+        ? await connection.getMultipleAccountsInfo(oracleKeys)
+        : [];
+
+    const validOracleIndex = oracleAccounts.findIndex(
+      (info): info is NonNullable<typeof info> =>
+        !!info && info.owner.equals(sb.ON_DEMAND_MAINNET_PID)
+    );
+
+    if (validOracleIndex === -1) {
+      throw new Error("Queue configured without oracles");
+    }
+
+    const oracleKey = oracleKeys[validOracleIndex];
+
+    const sbCommitIx = await switchboardProgram.instruction.randomnessCommit(
+      {},
+      {
+        accounts: {
+          randomness: randomness.pubkey,
+          queue,
+          oracle: oracleKey,
+          recentSlothashes: sb.SPL_SYSVAR_SLOT_HASHES_ID,
+          authority: wallet.publicKey,
+        },
+      }
+    );
 
     const commitIx = await program.methods
       .commitAWinner()
