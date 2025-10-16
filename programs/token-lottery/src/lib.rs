@@ -1,12 +1,23 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
+use anchor_spl::metadata::MetadataAccount;
 use anchor_spl::{
     associated_token::AssociatedToken,
     metadata::Metadata,
     token_interface::{Mint, TokenAccount, TokenInterface},
 };
+use anchor_spl::{
+    metadata::{
+        create_master_edition_v3, create_metadata_accounts_v3,
+        mpl_token_metadata::types::{CollectionDetails, Creator, DataV2},
+        set_and_verify_sized_collection_item, sign_metadata, CreateMasterEditionV3,
+        CreateMetadataAccountsV3, SetAndVerifySizedCollectionItem, SignMetadata,
+    },
+    token_interface::{mint_to, MintTo},
+};
+use switchboard_on_demand::RandomnessAccountData;
 
-declare_id!("HAsY3haak8k3TnvXhE2pZgVigvc1QBx4JF2Eixm2yJYV");
+declare_id!("33GifPu8vYu2ZKKgXoicN9FteTVWxUaosCMG4NaBPte5");
 
 #[constant]
 pub const NAME: &str = "Token Lottery Ticket #";
@@ -17,16 +28,6 @@ pub const SYMBOL: &str = "TICKET";
 
 #[program]
 pub mod token_lottery {
-    use anchor_spl::{
-        metadata::{
-            create_master_edition_v3, create_metadata_accounts_v3,
-            mpl_token_metadata::types::{CollectionDetails, Creator, DataV2},
-            set_and_verify_sized_collection_item, sign_metadata, CreateMasterEditionV3,
-            CreateMetadataAccountsV3, SetAndVerifySizedCollectionItem, SignMetadata,
-        },
-        token_interface::{mint_to, MintTo},
-    };
-    use switchboard_on_demand::RandomnessAccountData;
 
     use super::*;
 
@@ -253,13 +254,56 @@ pub mod token_lottery {
         let randomness_data =
             RandomnessAccountData::parse(ctx.accounts.randomness_account_data.data.borrow())
                 .unwrap();
-        if randomness_data.seed_slot!=clock.slot-1{
+        if randomness_data.seed_slot != clock.slot - 1 {
             return Err(ErrorCode::RandomnessAlreadyRevealed.into());
         }
         token_lottery.randomness_account = ctx.accounts.randomness_account_data.key();
 
         Ok(())
     }
+
+    pub fn choose_a_winner(ctx: Context<ChooseWinner>) -> Result<()> {
+        let clock = Clock::get()?;
+        let token_lottery = &mut ctx.accounts.token_lottery;
+
+        if ctx.accounts.randomness_account_data.key() != token_lottery.randomness_account {
+            return Err(ErrorCode::IncorrectRandomnessAccount.into());
+        }
+
+        if ctx.accounts.payer.key() != token_lottery.authority {
+            return Err(ErrorCode::NotAuthorized.into());
+        }
+
+        if clock.slot < token_lottery.end_time {
+            msg!("Current slot: {}", clock.slot);
+            msg!("End slot: {}", token_lottery.end_time);
+            return Err(ErrorCode::LotteryNotCompleted.into());
+        }
+        require!(
+            token_lottery.winner_chosen == false,
+            ErrorCode::WinnerChosen
+        );
+
+        let randomness_data =
+            RandomnessAccountData::parse(ctx.accounts.randomness_account_data.data.borrow())
+                .unwrap();
+        let revealed_random_value = randomness_data
+            .get_value(clock.slot)
+            .map_err(|_| ErrorCode::RandomnessNotResolved)?;
+
+        msg!("Randomness result: {}", revealed_random_value[0]);
+        msg!("Ticket num: {}", token_lottery.ticket_num);
+
+        let winner = revealed_random_value[0] as u64 % token_lottery.ticket_num;
+
+        msg!("Winner: {}", winner);
+
+        token_lottery.winner = winner;
+        token_lottery.winner_chosen = true;
+
+        Ok(())
+    }
+
 }
 
 #[derive(Accounts)]
@@ -451,6 +495,78 @@ pub struct CommitWinner<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct ChooseWinner<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"token_lottery".as_ref()],
+        bump = token_lottery.bump,
+    )]
+    pub token_lottery: Account<'info, TokenLottery>,
+
+    /// CHECK: The account's data is validated manually within the handler
+    pub randomness_account_data: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimPrize<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"token_lottery".as_ref()],
+        bump = token_lottery.bump,
+    )]
+    pub token_lottery: Account<'info, TokenLottery>,
+
+    #[account(
+        mut,
+        seeds = [b"collection_mint".as_ref()],
+        bump,
+    )]
+    pub collection_mint: InterfaceAccount<'info, Mint>,
+
+    #[account(
+        mut,
+        seeds = [b"metadata", token_metadata_program.key().as_ref(), collection_mint.key().as_ref()],
+        bump,
+        seeds::program = token_metadata_program.key()
+    )]
+    pub collection_metadata: Account<'info, MetadataAccount>,
+
+    #[account(
+        mut,
+        seeds = [token_lottery.winner.to_le_bytes().as_ref()],
+        bump,
+    )]
+    pub ticket_mint: InterfaceAccount<'info, Mint>,
+
+    #[account(
+        seeds = [b"metadata", token_metadata_program.key().as_ref(), ticket_mint.key().as_ref()],
+        bump,
+        seeds::program = token_metadata_program.key()
+    )]
+    pub ticket_metadata: Account<'info, MetadataAccount>,
+    
+    #[account(
+        associated_token::mint = ticket_mint,
+        associated_token::authority = payer,
+        associated_token::token_program = token_program,
+    )]
+    pub destination: InterfaceAccount<'info, TokenAccount>,
+
+
+    pub token_program: Interface<'info, TokenInterface>,
+    pub system_program: Program<'info, System>,
+    pub token_metadata_program: Program<'info, Metadata>,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct TokenLottery {
@@ -480,4 +596,8 @@ pub enum ErrorCode {
     WinnerChosen,
     #[msg("Randomness already revealed for this slot")]
     RandomnessAlreadyRevealed,
+    #[msg("Randomness not resolved")]
+    RandomnessNotResolved,
+    #[msg("Winner has not been chosen yet")]
+    WinnerNotChosen,
 }
