@@ -304,6 +304,33 @@ pub mod token_lottery {
         Ok(())
     }
 
+    pub fn claim_prize(ctx: Context<ClaimPrize>) -> Result<()> {
+        // Check if winner has been chosen
+        msg!("Winner chosen: {}", ctx.accounts.token_lottery.winner_chosen);
+        require!(ctx.accounts.token_lottery.winner_chosen, ErrorCode::WinnerNotChosen);
+
+        // Check if token is a part of the collection
+        require!(ctx.accounts.ticket_metadata.collection.as_ref().unwrap().verified, ErrorCode::NotVerifiedTicket);
+        require!(ctx.accounts.ticket_metadata.collection.as_ref().unwrap().key == ctx.accounts.collection_mint.key(), ErrorCode::IncorrectTicket);
+
+        let ticket_name = NAME.to_owned() + &ctx.accounts.token_lottery.winner.to_string();
+        let metadata_name = ctx.accounts.collection_metadata.name.replace("\u{0}", "");
+
+        msg!("Ticket name: {}", ticket_name);
+        msg!("Metadata name: {}", metadata_name);
+
+        // Check if the winner has the winning ticket
+        require!(metadata_name == ticket_name, ErrorCode::IncorrectTicket);
+        require!(ctx.accounts.destination.amount > 0, ErrorCode::IncorrectTicket);
+
+        **ctx.accounts.token_lottery.to_account_info().try_borrow_mut_lamports()? -= ctx.accounts.token_lottery.lottery_pot_amount;
+        **ctx.accounts.payer.try_borrow_mut_lamports()? += ctx.accounts.token_lottery.lottery_pot_amount;
+
+        ctx.accounts.token_lottery.lottery_pot_amount = 0;
+
+        Ok(())
+    }
+
 }
 
 #[derive(Accounts)]
@@ -600,4 +627,8 @@ pub enum ErrorCode {
     RandomnessNotResolved,
     #[msg("Winner has not been chosen yet")]
     WinnerNotChosen,
+    #[msg("Ticket is not verified as part of the collection")]
+    NotVerifiedTicket,
+    #[msg("Ticket does not belong to the correct collection")]
+    IncorrectTicket,
 }

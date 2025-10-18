@@ -67,11 +67,14 @@ describe("token-lottery", () => {
   }
 
   it("should init config", async () => {
+    const slot = await connection.getSlot();
+    console.log("Current slot:", slot);
+
     // Add your test here.
     const initConfigIx = await program.methods
       .initializeConfig(
-        new anchor.BN(10),
-        new anchor.BN(1860085765),
+        new anchor.BN(0),
+        new anchor.BN(slot + 10),
         new anchor.BN(10000)
       )
       .instruction();
@@ -218,5 +221,34 @@ describe("token-lottery", () => {
       commitSignature
     );
 
+    const sbRevealIx = await randomness.revealIx();
+    const revealIx = await program.methods.chooseAWinner()
+      .accounts({
+        randomnessAccountData: randomness.pubkey,
+      })
+      .instruction();
+    
+    const revealTx = await sb.asV0Tx(
+      {
+        connection: provider.connection,
+        ixs: [sbRevealIx, revealIx],
+        payer: wallet.publicKey,
+        signers: [wallet.payer],
+        computeUnitPrice: 75_000,
+        computeUnitLimitMultiple: 1.3,  
+      }
+    );
+
+    const revealSignature = await connection.sendTransaction(revealTx);
+    await connection.confirmTransaction({
+      signature: revealSignature,
+      blockhash: blockhashWithContext2.value.blockhash,
+      lastValidBlockHeight: blockhashWithContext2.value.lastValidBlockHeight,
+    });
+    console.log(
+      "Transaction Signature for reveal: ",
+      revealSignature
+    );
   });
+
 });
