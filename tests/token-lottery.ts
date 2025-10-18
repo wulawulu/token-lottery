@@ -18,6 +18,65 @@ describe("token-lottery", () => {
   let switchboardProgram;
   const rngKp = anchor.web3.Keypair.generate();
   console.log("sb ondemand mainnet pid", sb.ON_DEMAND_MAINNET_PID);
+  const RANDOMNESS_TIMEOUT_MS = 60_000;
+  const RANDOMNESS_RETRY_DELAY_MS = 2_000;
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  async function confirmSignature(
+    signature: anchor.web3.TransactionSignature,
+    commitment: anchor.web3.Commitment = "confirmed"
+  ) {
+    await connection.confirmTransaction(signature, commitment);
+    console.log(`Confirmed transaction ${signature}`);
+  }
+
+  async function waitForRandomnessWindow(randomness: sb.Randomness) {
+    const randomnessData = await randomness.loadData();
+    const seedSlot = (randomnessData.seedSlot as anchor.BN).toNumber();
+    console.log("Randomness seed slot", seedSlot);
+
+    const start = Date.now();
+    while (true) {
+      const currentSlot = await connection.getSlot();
+      if (currentSlot > seedSlot) {
+        console.log(
+          `Current slot ${currentSlot} exceeded seed slot ${seedSlot}`
+        );
+        return { seedSlot, currentSlot };
+      }
+
+      if (Date.now() - start > RANDOMNESS_TIMEOUT_MS) {
+        throw new Error(
+          `Timed out waiting for slot to pass seed slot ${seedSlot}`
+        );
+      }
+
+      await sleep(1000);
+    }
+  }
+
+  async function buildRevealIxWithRetry(randomness: sb.Randomness) {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        return await randomness.revealIx();
+      } catch (err) {
+        lastError = err;
+        console.warn(
+          `Reveal attempt ${attempt} failed: ${
+            err instanceof Error ? err.message : err
+          }`
+        );
+        if (attempt === 5) {
+          break;
+        }
+        await sleep(RANDOMNESS_RETRY_DELAY_MS);
+      }
+    }
+    throw lastError ?? new Error("Failed to build reveal instruction");
+  }
 
   before("Loading switchboard program", async () => {
     const switchboardIdlPath = path.resolve(
@@ -118,17 +177,17 @@ describe("token-lottery", () => {
     await buyTicket();
     await buyTicket();
 
-    const queue = new anchor.web3.PublicKey(
-      "A43DyUGA7s8eXPxqEjJY6EBu1KKbNgfxF8h17VAHn13w"
-    );
+    if (!switchboardProgram) {
+      throw new Error("Switchboard program not initialized");
+    }
 
-    const queueAccount = new sb.Queue(switchboardProgram, queue);
-    console.log("Queue account", queue.toString());
+    const queueAccount = await sb.Queue.loadDefault(switchboardProgram);
+    const queue = queueAccount.pubkey;
+    console.log("Queue account", queue.toBase58());
     try {
       await queueAccount.loadData();
     } catch (err) {
-      console.log("Queue account not found");
-      process.exit(1);
+      throw new Error("Queue account not found");
     }
 
     const [randomness, ix] = await sb.Randomness.create(
@@ -148,17 +207,10 @@ describe("token-lottery", () => {
       computeUnitLimitMultiple: 1.3,
     });
 
-    const blockhashWithContext2 =
-      await provider.connection.getLatestBlockhashAndContext();
-
     const createRandomnessSignature = await connection.sendTransaction(
       createRandomnessTx
     );
-    await connection.confirmTransaction({
-      signature: createRandomnessSignature,
-      blockhash: blockhashWithContext2.value.blockhash,
-      lastValidBlockHeight: blockhashWithContext2.value.lastValidBlockHeight,
-    });
+    await confirmSignature(createRandomnessSignature);
     console.log(
       "Transaction Signature for randomness account creatation: ",
       createRandomnessSignature
@@ -172,7 +224,9 @@ describe("token-lottery", () => {
 
     const validOracleIndex = oracleAccounts.findIndex(
       (info): info is NonNullable<typeof info> =>
-        !!info && info.owner.equals(sb.ON_DEMAND_MAINNET_PID)
+        !!info &&
+        (info.owner.equals(sb.ON_DEMAND_MAINNET_PID) ||
+          info.owner.equals(sb.ON_DEMAND_DEVNET_PID))
     );
 
     if (validOracleIndex === -1) {
@@ -200,7 +254,7 @@ describe("token-lottery", () => {
         randomnessAccountData: randomness.pubkey,
       })
       .instruction();
-    
+
     const commitTx = await sb.asV0Tx({
       connection: provider.connection,
       ixs: [sbCommitIx, commitIx],
@@ -211,44 +265,56 @@ describe("token-lottery", () => {
     });
 
     const commitSignature = await connection.sendTransaction(commitTx);
-    await connection.confirmTransaction({
-      signature: commitSignature,
-      blockhash: blockhashWithContext2.value.blockhash,
-      lastValidBlockHeight: blockhashWithContext2.value.lastValidBlockHeight,
-    });
+    await confirmSignature(commitSignature);
     console.log(
       "Transaction Signature for commit: ",
       commitSignature
     );
 
-    const sbRevealIx = await randomness.revealIx();
+    await waitForRandomnessWindow(randomness);
+
+    const sbRevealIx = await buildRevealIxWithRetry(randomness);
     const revealIx = await program.methods.chooseAWinner()
       .accounts({
         randomnessAccountData: randomness.pubkey,
       })
       .instruction();
-    
-    const revealTx = await sb.asV0Tx(
-      {
-        connection: provider.connection,
-        ixs: [sbRevealIx, revealIx],
-        payer: wallet.publicKey,
-        signers: [wallet.payer],
-        computeUnitPrice: 75_000,
-        computeUnitLimitMultiple: 1.3,  
-      }
-    );
+
+    const revealTx = await sb.asV0Tx({
+      connection: provider.connection,
+      ixs: [sbRevealIx, revealIx],
+      payer: wallet.publicKey,
+      signers: [wallet.payer],
+      computeUnitPrice: 75_000,
+      computeUnitLimitMultiple: 1.3,
+    });
 
     const revealSignature = await connection.sendTransaction(revealTx);
-    await connection.confirmTransaction({
-      signature: revealSignature,
-      blockhash: blockhashWithContext2.value.blockhash,
-      lastValidBlockHeight: blockhashWithContext2.value.lastValidBlockHeight,
-    });
+    await confirmSignature(revealSignature);
     console.log(
       "Transaction Signature for reveal: ",
       revealSignature
     );
+
+    const claimIx = await program.methods.claimPrize()
+      .accounts({
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .instruction();
+      
+    const claimTx = new anchor.web3.Transaction({
+      feePayer: wallet.publicKey,
+      blockhash: blockhashWithContext.blockhash,
+      lastValidBlockHeight: blockhashWithContext.lastValidBlockHeight,
+    }).add(claimIx);
+    const claimSignature = await anchor.web3.sendAndConfirmTransaction(
+      provider.connection,
+      claimTx,
+      [wallet.payer],
+      { skipPreflight: true }
+    );
+    console.log("Your claim transaction signature", claimSignature);  
+
   });
 
 });
